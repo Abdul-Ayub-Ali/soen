@@ -1,0 +1,25 @@
+{
+  "name": "seon",
+  "version": "1.0.0",
+  "description": "",
+  "main": "rename.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abdul-Ayub-Ali/soen.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/Abdul-Ayub-Ali/soen/issues"
+  },
+  "homepage": "https://github.com/Abdul-Ayub-Ali/soen#readme",
+  "dependencies": {
+    "axios": "^1.18.1",
+    "socket.io-client": "^4.8.3"
+  }
+}
