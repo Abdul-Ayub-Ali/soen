@@ -2,6 +2,8 @@ import { useState, useContext } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { UserContext } from "../context/user.context";
 import axios from "../config/axios";
+import { getErrorMessage, showError, showSuccess } from "../utils/toast";
+import { resetSessionInvalidation } from "../utils/session";
 
 const Register = () => {
   const [name, setName] = useState("");
@@ -23,15 +25,20 @@ const Register = () => {
         password,
       })
       .then((res) => {
+        resetSessionInvalidation();
         localStorage.setItem("token", res.data.token);
         localStorage.setItem("user", JSON.stringify(res.data.user));
         setUser(res.data.user);
+        showSuccess("Account created successfully");
         navigate("/home");
       })
       .catch((err) => {
-        setError(
-          err.response?.data?.error || "Unable to register. Please try again.",
+        const message = getErrorMessage(
+          err,
+          "Unable to register. Please try again.",
         );
+        setError(message);
+        showError(message);
       });
   }
 

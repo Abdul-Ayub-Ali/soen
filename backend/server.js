@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import { generateResult } from "./services/ai.service.js";
 import redisClient from "./services/redis.service.js";
 import * as messageService from "./services/message.service.js";
+import * as presenceService from "./services/presence.service.js";
 
 // Validate required environment variables
 const requiredEnvVars = ["JWT_SECRET", "MONGODB_URI"];
@@ -40,6 +41,27 @@ const respond = (ack, payload) => {
   }
 };
 
+const invalidateDeletedUser = (socket, error) => {
+  if (error?.code !== "USER_DELETED") {
+    return false;
+  }
+
+  socket.emit("account-deleted", {
+    message: "Your account was removed. Please register again.",
+  });
+  socket.disconnect(true);
+  return true;
+};
+
+const broadcastPresence = async (email) => {
+  const normalizedEmail = messageService.normalizeEmail(email);
+  const snapshot = await presenceService.getPresenceSnapshot([normalizedEmail]);
+  io.emit("user-presence", {
+    email: normalizedEmail,
+    ...snapshot[normalizedEmail],
+  });
+};
+
 io.use(async (socket, next) => {
   try {
     const authHeader = socket.handshake.headers.authorization;
@@ -63,13 +85,22 @@ io.use(async (socket, next) => {
       return next(new Error("Authentication error"));
     }
 
+    const user = await presenceService.ensureUserExists(
+      decoded._id,
+      decoded.email,
+    );
+
     socket.user = {
-      _id: decoded._id,
-      email: messageService.normalizeEmail(decoded.email),
+      _id: user._id.toString(),
+      email: messageService.normalizeEmail(user.email),
     };
 
     next();
   } catch (error) {
+    if (error.code === "USER_DELETED") {
+      return next(new Error("Account deleted"));
+    }
+
     next(new Error("Authentication error"));
   }
 });
@@ -77,11 +108,40 @@ io.use(async (socket, next) => {
 io.on("connection", (socket) => {
   const userEmail = socket.user.email;
   socket.join(getUserRoom(userEmail));
+  presenceService.setUserOnline(userEmail, socket.id);
+  broadcastPresence(userEmail);
 
   console.log(`User ${userEmail} connected`);
 
+  socket.on("heartbeat", async (_, ack) => {
+    try {
+      await presenceService.ensureUserExists(socket.user._id, socket.user.email);
+      respond(ack, { ok: true });
+    } catch (error) {
+      if (invalidateDeletedUser(socket, error)) {
+        respond(ack, { ok: false, error: error.message, code: "USER_DELETED" });
+        return;
+      }
+
+      respond(ack, { ok: false, error: error.message });
+    }
+  });
+
+  socket.on("get-presence", async ({ emails } = {}, ack) => {
+    try {
+      const presence = await presenceService.getPresenceSnapshot(emails || []);
+      respond(ack, { ok: true, data: { presence } });
+    } catch (error) {
+      respond(ack, { ok: false, error: error.message });
+    }
+  });
+
   socket.on("join-group", async ({ groupId } = {}, ack) => {
     try {
+      await presenceService.ensureUserExists(
+        socket.user._id,
+        socket.user.email,
+      );
       await messageService.ensureGroupAccess(groupId, socket.user._id);
       socket.join(getGroupRoom(groupId));
 
@@ -90,6 +150,11 @@ io.on("connection", (socket) => {
         data: { groupId },
       });
     } catch (error) {
+      if (invalidateDeletedUser(socket, error)) {
+        respond(ack, { ok: false, error: error.message, code: "USER_DELETED" });
+        return;
+      }
+
       console.log("Error joining group:", error.message);
       respond(ack, {
         ok: false,
@@ -106,8 +171,61 @@ io.on("connection", (socket) => {
     socket.leave(getGroupRoom(groupId));
   });
 
+  socket.on("typing-start", ({ context, contextId } = {}) => {
+    if (!context || !contextId) {
+      return;
+    }
+
+    presenceService.setTyping(context, contextId, userEmail, true);
+
+    const payload = {
+      context,
+      contextId,
+      email: userEmail,
+      isTyping: true,
+    };
+
+    if (context === "group") {
+      socket.to(getGroupRoom(contextId)).emit("typing-update", payload);
+      return;
+    }
+
+    if (context === "direct") {
+      io.to(getUserRoom(contextId)).emit("typing-update", payload);
+    }
+  });
+
+  socket.on("typing-stop", ({ context, contextId } = {}) => {
+    if (!context || !contextId) {
+      return;
+    }
+
+    presenceService.setTyping(context, contextId, userEmail, false);
+
+    const payload = {
+      context,
+      contextId,
+      email: userEmail,
+      isTyping: false,
+    };
+
+    if (context === "group") {
+      socket.to(getGroupRoom(contextId)).emit("typing-update", payload);
+      return;
+    }
+
+    if (context === "direct") {
+      io.to(getUserRoom(contextId)).emit("typing-update", payload);
+    }
+  });
+
   socket.on("send-group-message", async ({ groupId, content } = {}, ack) => {
     try {
+      await presenceService.ensureUserExists(
+        socket.user._id,
+        socket.user.email,
+      );
+
       const savedMessage = await messageService.saveGroupMessage({
         senderId: socket.user._id,
         senderEmail: socket.user.email,
@@ -131,15 +249,35 @@ io.on("connection", (socket) => {
           return;
         }
 
-        const result = await generateResult(prompt);
-        const aiMessage = await messageService.saveAiGroupMessage({
-          groupId,
-          content: result,
-        });
+        io.to(getGroupRoom(groupId)).emit("ai-thinking", { groupId });
 
-        io.to(getGroupRoom(groupId)).emit("group-message", aiMessage);
+        try {
+          const result = await generateResult(prompt);
+          const aiMessage = await messageService.saveAiGroupMessage({
+            groupId,
+            content: result,
+          });
+
+          io.to(getGroupRoom(groupId)).emit("group-message", aiMessage);
+        } catch (aiError) {
+          console.log("Error generating AI response:", aiError.message);
+          const fallbackMessage = await messageService.saveAiGroupMessage({
+            groupId,
+            content: JSON.stringify({
+              text: "Sorry, I could not generate a response right now. Please try again.",
+            }),
+          });
+          io.to(getGroupRoom(groupId)).emit("group-message", fallbackMessage);
+        } finally {
+          io.to(getGroupRoom(groupId)).emit("ai-done", { groupId });
+        }
       }
     } catch (error) {
+      if (invalidateDeletedUser(socket, error)) {
+        respond(ack, { ok: false, error: error.message, code: "USER_DELETED" });
+        return;
+      }
+
       console.log("Error sending group message:", error.message);
       respond(ack, {
         ok: false,
@@ -152,6 +290,11 @@ io.on("connection", (socket) => {
     "send-direct-message",
     async ({ recipientEmail, content } = {}, ack) => {
       try {
+        await presenceService.ensureUserExists(
+          socket.user._id,
+          socket.user.email,
+        );
+
         const savedMessage = await messageService.saveDirectMessage({
           senderId: socket.user._id,
           senderEmail: socket.user.email,
@@ -168,6 +311,15 @@ io.on("connection", (socket) => {
           data: { message: savedMessage },
         });
       } catch (error) {
+        if (invalidateDeletedUser(socket, error)) {
+          respond(ack, {
+            ok: false,
+            error: error.message,
+            code: "USER_DELETED",
+          });
+          return;
+        }
+
         console.log("Error sending direct message:", error.message);
         respond(ack, {
           ok: false,
@@ -177,7 +329,13 @@ io.on("connection", (socket) => {
     },
   );
 
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
+    const lastSeen = await presenceService.setUserOffline(userEmail, socket.id);
+    io.emit("user-presence", {
+      email: userEmail,
+      online: false,
+      lastSeenAt: lastSeen,
+    });
     console.log(`User ${userEmail} disconnected`);
   });
 });

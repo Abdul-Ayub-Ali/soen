@@ -57,6 +57,14 @@ router.put(
   groupController.kickUserFromGroup,
 );
 
+router.put(
+  "/update-name",
+  authMiddleWare.authUser,
+  body("groupId").trim().notEmpty().withMessage("Group ID is required"),
+  body("groupName").trim().notEmpty().withMessage("Group name is required"),
+  groupController.updateGroupName,
+);
+
 router.delete(
   "/delete/:groupId",
   authMiddleWare.authUser,

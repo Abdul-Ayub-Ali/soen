@@ -172,7 +172,7 @@ export const listDirectChats = async (currentUserEmail) => {
 
   const chats = await DirectChat.find({
     participants: normalizedCurrentUserEmail,
-    deletedBy: { $ne: normalizedCurrentUserEmail },
+    deletedBy: { $nin: [normalizedCurrentUserEmail] },
   }).sort({ lastMessageAt: -1, updatedAt: -1 });
 
   return chats.map((chat) =>
@@ -209,7 +209,6 @@ export const startDirectChat = async ({
       $setOnInsert: {
         participants,
         participantsKey,
-        deletedBy: [],
         lastMessage: "",
         lastMessageAt: new Date(),
       },
@@ -247,25 +246,44 @@ export const deleteDirectChat = async ({
   );
   const participantsKey = participants.join("::");
 
-  const chat = await DirectChat.findOneAndUpdate(
-    { participantsKey },
-    {
-      $setOnInsert: {
-        participants,
-        participantsKey,
-        deletedBy: [],
-        lastMessage: "",
-        lastMessageAt: new Date(),
+  let chat = await DirectChat.findOne({ participantsKey });
+
+  if (!chat) {
+    const hasMessages = await Message.exists(
+      buildDirectMessagePairQuery(
+        normalizedCurrentUserEmail,
+        normalizedRecipientEmail,
+      ),
+    );
+
+    if (!hasMessages) {
+      throw new Error("Chat not found");
+    }
+
+    chat = await DirectChat.create({
+      participants,
+      participantsKey,
+      deletedBy: [normalizedCurrentUserEmail],
+      lastMessage: "",
+      lastMessageAt: new Date(),
+    });
+  } else if (chat.deletedBy.includes(normalizedCurrentUserEmail)) {
+    return {
+      deletedFor: normalizedCurrentUserEmail,
+      recipientEmail: normalizedRecipientEmail,
+      deletedForEveryone: false,
+    };
+  } else {
+    chat = await DirectChat.findOneAndUpdate(
+      { participantsKey },
+      {
+        $addToSet: {
+          deletedBy: normalizedCurrentUserEmail,
+        },
       },
-      $addToSet: {
-        deletedBy: normalizedCurrentUserEmail,
-      },
-    },
-    {
-      new: true,
-      upsert: true,
-    },
-  );
+      { new: true },
+    );
+  }
 
   const allParticipantsDeleted = participants.every((email) =>
     chat.deletedBy.includes(email),
@@ -295,6 +313,17 @@ export const listDirectMessages = async ({
 }) => {
   const normalizedCurrentUserEmail = normalizeEmail(currentUserEmail);
   const normalizedRecipientEmail = normalizeEmail(recipientEmail);
+
+  const participants = normalizeDirectParticipants(
+    normalizedCurrentUserEmail,
+    normalizedRecipientEmail,
+  );
+  const participantsKey = participants.join("::");
+  const chat = await DirectChat.findOne({ participantsKey });
+
+  if (chat?.deletedBy?.includes(normalizedCurrentUserEmail)) {
+    throw new Error("Chat not found");
+  }
 
   const messages = await Message.find(
     buildDirectMessagePairQuery(

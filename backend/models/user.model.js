@@ -22,6 +22,11 @@ const userSchema = new mongoose.Schema({
     type: String,
     select: false,
   },
+
+  lastSeenAt: {
+    type: Date,
+    default: null,
+  },
 });
 
 userSchema.statics.hashPassword = async function (password) {

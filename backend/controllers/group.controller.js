@@ -161,6 +161,30 @@ export const getGroupById = async (req, res) => {
   }
 };
 
+export const updateGroupName = async (req, res) => {
+  const errors = validationResult(req);
+
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { groupId, groupName } = req.body;
+    const loggedInUser = await userModel.findOne({ email: req.user.email });
+
+    const group = await groupService.updateGroupName({
+      groupId,
+      ownerId: loggedInUser._id,
+      groupName,
+    });
+
+    return res.status(200).json({ group });
+  } catch (err) {
+    console.log(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
 export const deleteGroup = async (req, res) => {
   const { groupId } = req.params;
 

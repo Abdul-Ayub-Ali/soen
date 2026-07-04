@@ -214,8 +214,6 @@ export const addUsersToGroup = async ({ groupId, users, userId }) => {
     members: userId,
   });
 
-  console.log(group);
-
   if (!group) {
     throw new Error("User not belong to this group");
   }
@@ -255,6 +253,44 @@ export const getGroupById = async ({ groupId }) => {
     .populate("members owner");
 
   return group;
+};
+
+export const updateGroupName = async ({ groupId, ownerId, groupName }) => {
+  if (!groupId) {
+    throw new Error("groupId is required");
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(groupId)) {
+    throw new Error("Invalid groupId");
+  }
+
+  if (!ownerId) {
+    throw new Error("ownerId is required");
+  }
+
+  if (!groupName?.trim()) {
+    throw new Error("Group name is required");
+  }
+
+  const group = await groupModel.findById(groupId);
+  if (!group) {
+    throw new Error("Group not found");
+  }
+
+  if (group.owner.toString() !== ownerId.toString()) {
+    throw new Error("Only the group owner can rename the room");
+  }
+
+  try {
+    group.groupName = groupName.trim();
+    await group.save();
+    return await group.populate("members owner");
+  } catch (error) {
+    if (error.code === 11000) {
+      throw new Error("Group name already exists");
+    }
+    throw error;
+  }
 };
 
 export const deleteGroup = async ({ groupId, ownerId }) => {

@@ -16,6 +16,7 @@
     "markdown-to-jsx": "^7.7.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-hot-toast": "^2.6.0",
     "react-router-dom": "^7.0.2",
     "remixicon": "^4.5.0",
     "socket.io-client": "^4.8.1"

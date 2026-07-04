@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "../config/axios";
+import { getErrorMessage, showError } from "../utils/toast";
 import { Link } from "react-router-dom";
 
 const Dashboard = () => {
@@ -19,7 +20,7 @@ const Dashboard = () => {
         setRooms(groups.slice(0, 4));
       })
       .catch((err) => {
-        console.log(err);
+        showError(getErrorMessage(err, "Failed to load dashboard data."));
       });
   }, []);
 

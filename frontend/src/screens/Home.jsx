@@ -10,6 +10,9 @@ import {
   leaveGroupRoom,
   subscribeToSocketEvent,
 } from "../config/socket";
+import { getErrorMessage, showError, showSuccess } from "../utils/toast";
+import { formatLastSeen } from "../hooks/useSessionGuard";
+import { usePresence, useTypingIndicator } from "../hooks/usePresence";
 
 const appendUniqueMessage = (messages, incomingMessage) => {
   if (
@@ -42,6 +45,12 @@ const getMessageText = (message) => {
   return rawText;
 };
 
+const isAiRelatedMessage = (message) => {
+  const isAi = message?.sender?._id === "ai";
+  const text = message?.content || message?.message || "";
+  return isAi || /@ai/i.test(text);
+};
+
 const upsertDirectChat = (currentChats, currentUserEmail, message) => {
   const senderEmail = getSenderEmail(message);
   const recipientEmail =
@@ -65,6 +74,9 @@ const upsertDirectChat = (currentChats, currentUserEmail, message) => {
   ];
 };
 
+const getDirectChatPath = (recipientEmail) =>
+  `/messages/direct/${encodeURIComponent(recipientEmail.trim().toLowerCase())}`;
+
 const Home = () => {
   const { user, setUser } = useContext(UserContext);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -78,10 +90,34 @@ const Home = () => {
   const [groupName, setGroupName] = useState("");
   const [joinGroupId, setJoinGroupId] = useState("");
   const [recipientEmail, setRecipientEmail] = useState("");
+  const [deletingChatEmail, setDeletingChatEmail] = useState(null);
+  const [deletingGroupId, setDeletingGroupId] = useState(null);
+  const [renamingGroup, setRenamingGroup] = useState(null);
+  const [renameGroupName, setRenameGroupName] = useState("");
+  const [groupPreviews, setGroupPreviews] = useState({});
+  const [aiThinkingGroupId, setAiThinkingGroupId] = useState(null);
   const messagesEndRef = useRef(null);
   const selectedChatRef = useRef(null);
+  const typingStopTimerRef = useRef(null);
 
   const navigate = useNavigate();
+
+  const presenceEmails = directChats.map((chat) => chat.recipientEmail);
+
+  const presence = usePresence(presenceEmails);
+
+  const typingContext =
+    selectedChat?.type === "group"
+      ? { context: "group", contextId: selectedChat._id }
+      : selectedChat?.type === "direct"
+        ? { context: "direct", contextId: selectedChat.recipientEmail }
+        : { context: null, contextId: null };
+
+  const { typingUsers, notifyTyping } = useTypingIndicator({
+    context: typingContext.context,
+    contextId: typingContext.contextId,
+    currentUserEmail: user?.email,
+  });
 
   useEffect(() => {
     selectedChatRef.current = selectedChat;
@@ -95,10 +131,36 @@ const Home = () => {
     axios
       .get("/groups/all")
       .then((res) => {
-        setGroups(res.data.groups || []);
+        const loadedGroups = res.data.groups || [];
+        setGroups(loadedGroups);
+        loadGroupPreviews(loadedGroups);
       })
-      .catch((err) => console.log(err));
+      .catch((err) => {
+        showError(getErrorMessage(err, "Failed to load groups."));
+      });
   };
+
+  const loadGroupPreviews = (groupsList) => {
+    groupsList.forEach((group) => {
+      axios
+        .get(`/messages/group/${group._id}`)
+        .then((res) => {
+          const aiMsgs = (res.data.messages || []).filter(isAiRelatedMessage);
+          if (aiMsgs.length) {
+            const lastMsg = aiMsgs[aiMsgs.length - 1];
+            setGroupPreviews((prev) => ({
+              ...prev,
+              [group._id]: getMessageText(lastMsg),
+            }));
+          }
+        })
+        .catch(() => {});
+    });
+  };
+
+  const isGroupOwner = (group) =>
+    group?.owner?._id?.toString() === user?._id?.toString() ||
+    group?.owner?.toString() === user?._id?.toString();
 
   const loadDirectChats = () => {
     axios
@@ -112,25 +174,28 @@ const Home = () => {
 
         setDirectChats(chats);
       })
-      .catch((err) => console.log(err));
-  };
-
-  const loadGroupMessages = (groupId) => {
+      .catch((err) => {
+        showError(getErrorMessage(err, "Failed to load chats."));
+      });
     axios
       .get(`/messages/group/${groupId}`)
       .then((res) => {
         setMessages(res.data.messages || []);
       })
-      .catch((err) => console.log(err));
+      .catch((err) => {
+        showError(getErrorMessage(err, "Failed to load messages."));
+      });
   };
 
   const loadDirectMessages = (chatRecipientEmail) => {
     axios
-      .get(`/messages/direct/${chatRecipientEmail}`)
+      .get(getDirectChatPath(chatRecipientEmail))
       .then((res) => {
         setMessages(res.data.messages || []);
       })
-      .catch((err) => console.log(err));
+      .catch((err) => {
+        showError(getErrorMessage(err, "Failed to load messages."));
+      });
   };
 
   useEffect(() => {
@@ -166,6 +231,16 @@ const Home = () => {
     const unsubscribeGroupMessages = subscribeToSocketEvent(
       "group-message",
       (incomingMessage) => {
+        if (isAiRelatedMessage(incomingMessage)) {
+          setGroupPreviews((prev) => ({
+            ...prev,
+            [incomingMessage.groupId]: getMessageText(incomingMessage),
+          }));
+          setAiThinkingGroupId((current) =>
+            current === incomingMessage.groupId ? null : current,
+          );
+        }
+
         if (
           selectedChatRef.current?.type === "group" &&
           selectedChatRef.current._id === incomingMessage.groupId
@@ -177,9 +252,22 @@ const Home = () => {
       },
     );
 
+    const unsubscribeAiThinking = subscribeToSocketEvent(
+      "ai-thinking",
+      ({ groupId }) => {
+        setAiThinkingGroupId(groupId);
+      },
+    );
+
+    const unsubscribeAiDone = subscribeToSocketEvent("ai-done", ({ groupId }) => {
+      setAiThinkingGroupId((current) => (current === groupId ? null : current));
+    });
+
     return () => {
       unsubscribeDirectMessages();
       unsubscribeGroupMessages();
+      unsubscribeAiThinking();
+      unsubscribeAiDone();
     };
   }, [user?.email]);
 
@@ -190,7 +278,9 @@ const Home = () => {
     }
 
     if (selectedChat.type === "group") {
-      joinGroupRoom(selectedChat._id).catch((err) => console.log(err.message));
+      joinGroupRoom(selectedChat._id).catch((err) => {
+        showError(getErrorMessage(err, "Failed to join group room."));
+      });
       loadGroupMessages(selectedChat._id);
 
       return () => {
@@ -208,7 +298,7 @@ const Home = () => {
     const trimmedName = groupName.trim();
 
     if (!trimmedName) {
-      alert("Group name cannot be empty.");
+      showError("Group name cannot be empty.");
       return;
     }
 
@@ -218,9 +308,10 @@ const Home = () => {
         setIsModalOpen(false);
         setGroupName("");
         loadGroups();
+        showSuccess("Group created successfully");
       })
       .catch((error) => {
-        alert(error.response?.data?.errors || "Failed to create group.");
+        showError(getErrorMessage(error, "Failed to create group."));
       });
   };
 
@@ -229,7 +320,7 @@ const Home = () => {
     const trimmedId = joinGroupId.trim();
 
     if (!trimmedId) {
-      alert("Group ID cannot be empty.");
+      showError("Group ID cannot be empty.");
       return;
     }
 
@@ -239,9 +330,10 @@ const Home = () => {
         setIsModalOpen(false);
         setJoinGroupId("");
         loadGroups();
+        showSuccess("Joined group successfully");
       })
       .catch((error) => {
-        alert(error.response?.data?.error || "Failed to join group.");
+        showError(getErrorMessage(error, "Failed to join group."));
       });
   };
 
@@ -250,12 +342,12 @@ const Home = () => {
     const trimmedEmail = recipientEmail.trim().toLowerCase();
 
     if (!trimmedEmail) {
-      alert("Email cannot be empty.");
+      showError("Email cannot be empty.");
       return;
     }
 
     if (trimmedEmail === user?.email) {
-      alert("You cannot chat with yourself.");
+      showError("You cannot chat with yourself.");
       return;
     }
 
@@ -277,33 +369,121 @@ const Home = () => {
         setSelectedChat(chat);
         setIsModalOpen(false);
         setRecipientEmail("");
+        showSuccess("Direct chat started");
       })
       .catch((error) => {
-        alert(error.response?.data?.error || "Failed to start chat.");
+        showError(getErrorMessage(error, "Failed to start chat."));
       });
   };
 
   const deleteDirectChat = (chatRecipientEmail) => {
+    const normalizedEmail = chatRecipientEmail.trim().toLowerCase();
+
+    if (!normalizedEmail) {
+      return;
+    }
+
     if (!window.confirm("Delete this direct chat from your list?")) {
       return;
     }
 
+    setDeletingChatEmail(normalizedEmail);
+
     axios
-      .delete(`/messages/direct/${chatRecipientEmail}`)
+      .delete(getDirectChatPath(normalizedEmail))
       .then(() => {
         setDirectChats((currentChats) =>
           currentChats.filter(
-            (chat) => chat.recipientEmail !== chatRecipientEmail,
+            (chat) => chat.recipientEmail !== normalizedEmail,
           ),
         );
 
-        if (selectedChat?.recipientEmail === chatRecipientEmail) {
+        if (selectedChat?.recipientEmail === normalizedEmail) {
           setSelectedChat(null);
           setMessages([]);
         }
+
+        showSuccess("Chat deleted");
       })
       .catch((error) => {
-        alert(error.response?.data?.error || "Failed to delete chat.");
+        showError(getErrorMessage(error, "Failed to delete chat."));
+      })
+      .finally(() => {
+        setDeletingChatEmail(null);
+      });
+  };
+
+  const deleteGroup = (groupId) => {
+    if (!window.confirm("Delete this room? This action cannot be undone.")) {
+      return;
+    }
+
+    setDeletingGroupId(groupId);
+
+    axios
+      .delete(`/groups/delete/${groupId}`)
+      .then(() => {
+        setGroups((currentGroups) =>
+          currentGroups.filter((group) => group._id !== groupId),
+        );
+        setGroupPreviews((prev) => {
+          const next = { ...prev };
+          delete next[groupId];
+          return next;
+        });
+
+        if (selectedChat?._id === groupId) {
+          setSelectedChat(null);
+          setMessages([]);
+        }
+
+        showSuccess("Room deleted successfully");
+      })
+      .catch((error) => {
+        showError(getErrorMessage(error, "Failed to delete room."));
+      })
+      .finally(() => {
+        setDeletingGroupId(null);
+      });
+  };
+
+  const openRenameGroup = (group, event) => {
+    event.stopPropagation();
+    setRenamingGroup(group);
+    setRenameGroupName(group.groupName);
+  };
+
+  const updateGroupName = (e) => {
+    e.preventDefault();
+    const trimmedName = renameGroupName.trim();
+
+    if (!trimmedName || !renamingGroup) {
+      return;
+    }
+
+    axios
+      .put("/groups/update-name", {
+        groupId: renamingGroup._id,
+        groupName: trimmedName,
+      })
+      .then((res) => {
+        const updatedGroup = res.data.group;
+        setGroups((currentGroups) =>
+          currentGroups.map((group) =>
+            group._id === updatedGroup._id ? updatedGroup : group,
+          ),
+        );
+
+        if (selectedChat?._id === updatedGroup._id) {
+          setSelectedChat({ ...updatedGroup, type: "group" });
+        }
+
+        setRenamingGroup(null);
+        setRenameGroupName("");
+        showSuccess("Room renamed successfully");
+      })
+      .catch((error) => {
+        showError(getErrorMessage(error, "Failed to rename room."));
       });
   };
 
@@ -320,7 +500,9 @@ const Home = () => {
       selectedChat.type === "group"
         ? emitWithAck("send-group-message", {
             groupId: selectedChat._id,
-            content: trimmedMessage,
+            content: /@ai/i.test(trimmedMessage)
+              ? trimmedMessage
+              : `@ai ${trimmedMessage}`,
           })
         : emitWithAck("send-direct-message", {
             recipientEmail: selectedChat.recipientEmail,
@@ -330,19 +512,80 @@ const Home = () => {
     sendPromise
       .then(() => {
         setMessageInput("");
+        notifyTyping(false);
       })
       .catch((error) => {
-        alert(error.message || "Failed to send message.");
+        showError(getErrorMessage(error, "Failed to send message."));
       });
   };
 
-  const logout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    disconnectSocket();
-    setUser(null);
-    navigate("/login");
+  const handleMessageInputChange = (value) => {
+    setMessageInput(value);
+
+    if (!selectedChat || !value.trim()) {
+      notifyTyping(false);
+      return;
+    }
+
+    notifyTyping(true);
+
+    if (typingStopTimerRef.current) {
+      clearTimeout(typingStopTimerRef.current);
+    }
+
+    typingStopTimerRef.current = setTimeout(() => {
+      notifyTyping(false);
+    }, 1200);
   };
+
+  const logout = () => {
+    axios
+      .get("/users/logout")
+      .catch(() => {})
+      .finally(() => {
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        disconnectSocket();
+        setUser(null);
+        showSuccess("Logged out successfully");
+        navigate("/login");
+      });
+  };
+
+  const getChatStatusText = () => {
+    if (!selectedChat) {
+      return "";
+    }
+
+    if (selectedChat.type === "group") {
+      if (aiThinkingGroupId === selectedChat._id) {
+        return "@ai is thinking...";
+      }
+
+      if (typingUsers.length) {
+        return `${typingUsers.join(", ")} ${typingUsers.length === 1 ? "is" : "are"} typing...`;
+      }
+
+      return `${selectedChat.members?.length || 0} members`;
+    }
+
+    const recipientPresence = presence[selectedChat.recipientEmail];
+
+    if (typingUsers.includes(selectedChat.recipientEmail)) {
+      return "typing...";
+    }
+
+    if (recipientPresence?.online) {
+      return "Online";
+    }
+
+    return formatLastSeen(recipientPresence?.lastSeenAt);
+  };
+
+  const displayedMessages =
+    selectedChat?.type === "group"
+      ? messages.filter(isAiRelatedMessage)
+      : messages;
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -438,13 +681,40 @@ const Home = () => {
                       : "border-white/10 bg-white/5 hover:bg-white/10"
                   }`}
                 >
-                  <p className="truncate text-sm font-semibold text-white">
-                    <i className="ri-group-2-line mr-2 text-cyan-400"></i>
-                    {group.groupName}
-                  </p>
-                  <p className="mt-1 text-xs text-gray-400">
-                    {group.members?.length || 0} members
-                  </p>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-white">
+                        <i className="ri-group-2-line mr-2 text-cyan-400"></i>
+                        {group.groupName}
+                      </p>
+                      <p className="mt-1 truncate text-xs text-gray-400">
+                        {groupPreviews[group._id] ||
+                          `${group.members?.length || 0} members`}
+                      </p>
+                    </div>
+                    {isGroupOwner(group) && (
+                      <div className="flex shrink-0 gap-1">
+                        <button
+                          onClick={(event) => openRenameGroup(group, event)}
+                          className="rounded p-1 text-gray-400 transition hover:bg-white/10 hover:text-cyan-300"
+                          title="Rename room"
+                        >
+                          <i className="ri-edit-line"></i>
+                        </button>
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            deleteGroup(group._id);
+                          }}
+                          disabled={deletingGroupId === group._id}
+                          className="rounded p-1 text-gray-400 transition hover:bg-white/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Delete room"
+                        >
+                          <i className="ri-delete-bin-line"></i>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               ))
             )}
@@ -490,13 +760,26 @@ const Home = () => {
                       <p className="mt-1 truncate text-xs text-gray-400">
                         {chat.lastMessage || "No messages yet"}
                       </p>
+                      {presence[chat.recipientEmail]?.online ? (
+                        <span className="mt-1 inline-flex items-center gap-1 text-[10px] text-emerald-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                          Online
+                        </span>
+                      ) : (
+                        <span className="mt-1 text-[10px] text-gray-500">
+                          {formatLastSeen(
+                            presence[chat.recipientEmail]?.lastSeenAt,
+                          )}
+                        </span>
+                      )}
                     </div>
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
                         deleteDirectChat(chat.recipientEmail);
                       }}
-                      className="rounded p-1 text-gray-400 transition hover:bg-white/10 hover:text-red-300"
+                      disabled={deletingChatEmail === chat.recipientEmail}
+                      className="rounded p-1 text-gray-400 transition hover:bg-white/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"
                       title="Delete chat"
                     >
                       <i className="ri-delete-bin-line"></i>
@@ -526,9 +809,7 @@ const Home = () => {
                   : selectedChat.recipientEmail}
               </h2>
               <p className="text-xs text-gray-400">
-                {selectedChat.type === "group"
-                  ? `${selectedChat.members?.length || 0} members`
-                  : "Direct message"}
+                {getChatStatusText()}
               </p>
             </div>
           ) : (
@@ -550,15 +831,19 @@ const Home = () => {
             {selectedChat?.type === "direct" && (
               <button
                 onClick={() => deleteDirectChat(selectedChat.recipientEmail)}
-                className="rounded-lg bg-red-500/20 px-4 py-2 text-sm text-red-300 transition hover:bg-red-500/30"
+                disabled={deletingChatEmail === selectedChat.recipientEmail}
+                className="rounded-lg bg-red-500/20 px-4 py-2 text-sm text-red-300 transition hover:bg-red-500/30 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <i className="ri-delete-bin-line mr-1"></i> Delete Chat
+                <i className="ri-delete-bin-line mr-1"></i>{" "}
+                {deletingChatEmail === selectedChat.recipientEmail
+                  ? "Deleting..."
+                  : "Delete Chat"}
               </button>
             )}
           </div>
         </div>
 
-        <div className="flex-1 space-y-4 overflow-y-auto p-6">
+        <div className="hide-scrollbar flex-1 space-y-4 overflow-y-auto p-6">
           {!selectedChat ? (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
@@ -595,16 +880,19 @@ const Home = () => {
             </div>
           ) : (
             <>
-              {messages.length === 0 ? (
+              {displayedMessages.length === 0 ? (
                 <div className="flex h-full items-center justify-center">
                   <p className="text-gray-500">
-                    No messages yet. Start the conversation!
+                    {selectedChat.type === "group"
+                      ? "No @ai conversation yet. Send a message with @ai to start."
+                      : "No messages yet. Start the conversation!"}
                   </p>
                 </div>
               ) : (
-                messages.map((message) => {
+                displayedMessages.map((message) => {
                   const senderEmail = getSenderEmail(message);
                   const isCurrentUserMessage = senderEmail === user?.email;
+                  const isAi = message?.sender?._id === "ai";
 
                   return (
                     <div
@@ -618,14 +906,16 @@ const Home = () => {
                     >
                       <div
                         className={`max-w-xs rounded-lg border px-4 py-2 ${
-                          isCurrentUserMessage
-                            ? "border-cyan-500/50 bg-cyan-500/30 text-white"
-                            : "border-white/10 bg-white/10 text-gray-100"
+                          isAi
+                            ? "border-cyan-500/30 bg-slate-900/80 text-gray-100"
+                            : isCurrentUserMessage
+                              ? "border-cyan-500/50 bg-cyan-500/30 text-white"
+                              : "border-white/10 bg-white/10 text-gray-100"
                         }`}
                       >
-                        {selectedChat.type === "group" && !isCurrentUserMessage && (
+                        {selectedChat.type === "group" && (
                           <p className="mb-1 text-xs text-gray-400">
-                            {senderEmail || "Unknown"}
+                            {isAi ? "AI" : senderEmail || "Unknown"}
                           </p>
                         )}
                         <p className="break-words text-sm">
@@ -642,6 +932,23 @@ const Home = () => {
                   );
                 })
               )}
+              {selectedChat?.type === "group" &&
+                aiThinkingGroupId === selectedChat._id && (
+                  <div className="flex justify-start">
+                    <div className="rounded-lg border border-cyan-500/30 bg-slate-900/80 px-4 py-2 text-sm text-cyan-200">
+                      <i className="ri-loader-4-line mr-2 animate-spin"></i>
+                      @ai is generating a response...
+                    </div>
+                  </div>
+                )}
+              {typingUsers.length > 0 && (
+                <div className="flex justify-start">
+                  <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-xs text-gray-300">
+                    {typingUsers.join(", ")}{" "}
+                    {typingUsers.length === 1 ? "is" : "are"} typing...
+                  </div>
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </>
           )}
@@ -653,8 +960,13 @@ const Home = () => {
               <input
                 type="text"
                 value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                placeholder="Type a message..."
+                onChange={(e) => handleMessageInputChange(e.target.value)}
+                onBlur={() => notifyTyping(false)}
+                placeholder={
+                  selectedChat?.type === "group"
+                    ? "Message @ai..."
+                    : "Type a message..."
+                }
                 className="flex-1 rounded-lg border border-white/20 bg-white/10 px-4 py-3 text-white placeholder-gray-500 focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/20"
               />
               <button
@@ -751,6 +1063,45 @@ const Home = () => {
                 </button>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {renamingGroup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-lg border border-white/10 bg-slate-900 p-6 shadow-2xl">
+            <div className="mb-4 flex justify-between">
+              <h2 className="text-xl font-semibold text-white">Rename Room</h2>
+              <button
+                onClick={() => {
+                  setRenamingGroup(null);
+                  setRenameGroupName("");
+                }}
+                className="text-gray-400 hover:text-white"
+              >
+                <i className="ri-close-line text-xl"></i>
+              </button>
+            </div>
+            <form onSubmit={updateGroupName} className="space-y-4">
+              <div>
+                <label className="mb-2 block text-sm text-gray-300">
+                  Room Name
+                </label>
+                <input
+                  type="text"
+                  value={renameGroupName}
+                  onChange={(e) => setRenameGroupName(e.target.value)}
+                  placeholder="Enter new room name..."
+                  className="w-full rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-white placeholder-gray-500 focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 px-4 py-2 font-medium text-white transition hover:from-cyan-600 hover:to-blue-600"
+              >
+                Save Name
+              </button>
+            </form>
           </div>
         </div>
       )}

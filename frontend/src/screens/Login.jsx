@@ -2,6 +2,8 @@ import { useState, useContext } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import axios from "../config/axios";
 import { UserContext } from "../context/user.context";
+import { getErrorMessage, showError, showSuccess } from "../utils/toast";
+import { resetSessionInvalidation } from "../utils/session";
 
 const Login = () => {
   const [email, setEmail] = useState("");
@@ -21,15 +23,20 @@ const Login = () => {
         password,
       })
       .then((res) => {
+        resetSessionInvalidation();
         localStorage.setItem("token", res.data.token);
         localStorage.setItem("user", JSON.stringify(res.data.user));
         setUser(res.data.user);
+        showSuccess("Logged in successfully");
         navigate("/home");
       })
       .catch((err) => {
-        setError(
-          err.response?.data?.error || "Invalid credentials. Please try again.",
+        const message = getErrorMessage(
+          err,
+          "Invalid credentials. Please try again.",
         );
+        setError(message);
+        showError(message);
       });
   }
 

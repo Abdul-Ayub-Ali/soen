@@ -42,22 +42,26 @@ export const startDirectChat = async (req, res) => {
 
 export const deleteDirectChat = async (req, res) => {
   try {
-    const { recipientEmail } = req.params;
+    const recipientEmail = decodeURIComponent(req.params.recipientEmail || "");
     const result = await messageService.deleteDirectChat({
       currentUserEmail: req.user.email,
       recipientEmail,
     });
 
-    res.status(200).json(result);
+    res.status(200).json({
+      message: "Chat deleted successfully",
+      ...result,
+    });
   } catch (err) {
     console.log(err);
-    res.status(400).json({ error: err.message });
+    const statusCode = err.message === "Chat not found" ? 404 : 400;
+    res.status(statusCode).json({ error: err.message });
   }
 };
 
 export const getDirectMessages = async (req, res) => {
   try {
-    const { recipientEmail } = req.params;
+    const recipientEmail = decodeURIComponent(req.params.recipientEmail || "");
     const messages = await messageService.listDirectMessages({
       currentUserEmail: req.user.email,
       recipientEmail,
@@ -66,7 +70,8 @@ export const getDirectMessages = async (req, res) => {
     res.status(200).json({ messages });
   } catch (err) {
     console.log(err);
-    res.status(400).json({ error: err.message });
+    const statusCode = err.message === "Chat not found" ? 404 : 400;
+    res.status(statusCode).json({ error: err.message });
   }
 };
 

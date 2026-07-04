@@ -1,5 +1,6 @@
 import userModel from "../models/user.model.js";
 import * as userService from "../services/user.service.js";
+import * as presenceService from "../services/presence.service.js";
 import { validationResult } from "express-validator";
 import redisClient from "../services/redis.service.js";
 
@@ -61,9 +62,44 @@ export const loginController = async (req, res) => {
 };
 
 export const profileController = async (req, res) => {
-  res.status(200).json({
-    user: req.user,
-  });
+  try {
+    const user = await userService.getUserProfile({
+      userId: req.user._id,
+      email: req.user.email,
+    });
+
+    res.status(200).json({
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    if (error.code === "USER_DELETED") {
+      return res.status(404).json({
+        error: "Account no longer exists",
+        code: "USER_DELETED",
+      });
+    }
+
+    res.status(400).json({ error: error.message });
+  }
+};
+
+export const presenceController = async (req, res) => {
+  try {
+    const emails = String(req.query.emails || "")
+      .split(",")
+      .map((email) => email.trim())
+      .filter(Boolean);
+
+    const presence = await presenceService.getPresenceSnapshot(emails);
+
+    res.status(200).json({ presence });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 };
 
 export const logoutController = async (req, res) => {
